@@ -1,20 +1,21 @@
-//! The real provider: talks to the playit.gg API (`https://api.playit.gg`).
+//! The real provider: talks to the playit.gg API (`https://api.playit.gg`) as a
+//! **self-managed agent** using the **V1** tunnel API.
+//!
+//! Background: playit cancelled account API keys (abuse), so the account
+//! `/tunnels/*` write endpoints are unusable. Instead, an agent claimed as
+//! `self-managed` (`permissions.is_self_managed == true`) can create and manage
+//! *its own* tunnels via the V1 API with just its agent key. This mirrors the
+//! official `playit-minecraft-plugin`. See the repo `CLAUDE.md` for the claim
+//! flow that provisions a self-managed key.
 //!
 //! The API is RPC-style — every call is `POST /<path>` with a JSON body and an
 //! `Authorization: <Kind>-Key <secret>` header, returning an envelope of the
 //! form `{"status":"success","data":…}` or `{"status":"error","data":{…}}`.
-//!
-//! Auth is modelled by [`PlayitCredential`]. Note: an **agent** key is read-only
-//! for account/tunnel operations — playit rejects create/update/delete with
-//! `NotAllowedWithReadOnly`. Writes require an account **API key**, which this
-//! provider is wired for so it works the moment playit offers one (no code
-//! change; just set `PLAYIT_API_KEY`).
 
 use async_trait::async_trait;
 use reqwest::header::AUTHORIZATION;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
 use tracing::{info, warn};
 
 use super::{DesiredTunnel, ProvisionedTunnel, TunnelProvider};
@@ -23,16 +24,15 @@ use crate::error::{Error, Result};
 
 const API_BASE: &str = "https://api.playit.gg";
 
-/// A credential for the playit.gg API.
+/// A credential for the playit.gg API — becomes an `Authorization` header.
 #[derive(Clone)]
 pub enum PlayitCredential {
-    /// Agent secret key (the value used as the agent's `SECRET_KEY`). Read-only
-    /// for account/tunnel operations: fine for listing, but the API rejects
-    /// create/update/delete with `NotAllowedWithReadOnly`.
+    /// Agent secret key. A **self-managed** agent can create its own tunnels via
+    /// the V1 API; an assignable agent is read-only. This is the credential to
+    /// use (as `PLAYIT_AGENT_KEY`).
     AgentKey(String),
-    /// Account API key. Write-capable. Not offered on every account yet (the
-    /// account "API Keys" page may be empty), but wired up here so enabling it
-    /// later is a config-only change.
+    /// Account API key — playit **cancelled** these (abuse). Kept only so the
+    /// header type exists; not a working write path.
     ApiKey(String),
 }
 
@@ -43,19 +43,12 @@ impl PlayitCredential {
             PlayitCredential::ApiKey(v) => format!("Api-Key {}", v.trim()),
         }
     }
-
-    /// Whether this credential can only read (agent keys can't write tunnels).
-    fn is_read_only(&self) -> bool {
-        matches!(self, PlayitCredential::AgentKey(_))
-    }
 }
 
-/// Provider backed by the live playit.gg API.
+/// Provider backed by the live playit.gg V1 API.
 pub struct PlayitProvider {
     http: reqwest::Client,
     auth_header: String,
-    read_only: bool,
-    agent_id: OnceLock<String>,
 }
 
 impl PlayitProvider {
@@ -64,13 +57,11 @@ impl PlayitProvider {
         Self {
             http: reqwest::Client::new(),
             auth_header: credential.header_value(),
-            read_only: credential.is_read_only(),
-            agent_id: OnceLock::new(),
         }
     }
 
-    /// POST `body` to `path` and return the `data` field, translating the
-    /// playit error envelope into a [`Error::Provider`].
+    /// POST `body` to `path` and return the `data` field, translating the playit
+    /// error envelope into an [`Error::Provider`].
     async fn call_raw<B: Serialize>(&self, path: &str, body: &B) -> Result<serde_json::Value> {
         let url = format!("{API_BASE}{path}");
         let resp = self
@@ -99,16 +90,7 @@ impl PlayitProvider {
             .pointer("/data/message")
             .and_then(|s| s.as_str())
             .unwrap_or("");
-        if kind == "auth" && msg == "NotAllowedWithReadOnly" {
-            Err(Error::Provider(
-                "playit rejected the write: this credential is read-only (agent keys cannot \
-                 create or modify tunnels). Supply a write-capable account API key via \
-                 PLAYIT_API_KEY."
-                    .to_string(),
-            ))
-        } else {
-            Err(Error::Provider(format!("playit {path}: {kind} — {msg}")))
-        }
+        Err(Error::Provider(format!("playit {path}: {kind} — {msg}")))
     }
 
     /// Like [`Self::call_raw`] but deserializes `data` into `R`.
@@ -118,111 +100,52 @@ impl PlayitProvider {
             .map_err(|e| Error::Provider(format!("decoding {path} data: {e}")))
     }
 
-    /// The id of the agent this credential belongs to, discovered once from
-    /// `/agents/rundata` and cached.
-    async fn agent_id(&self) -> Result<String> {
-        if let Some(id) = self.agent_id.get() {
-            return Ok(id.clone());
-        }
-        let data: AgentRunData = self.call("/agents/rundata", &Empty {}).await?;
-        let _ = self.agent_id.set(data.agent_id.clone());
-        Ok(data.agent_id)
+    /// Fetch this agent's run data: its id, self-managed status, and its tunnels.
+    async fn rundata(&self) -> Result<AgentRunDataV1> {
+        self.call("/v1/agents/rundata", &Empty {}).await
     }
 
-    async fn list_tunnels(&self) -> Result<Vec<AccountTunnel>> {
-        let req = ReqList {
-            tunnel_id: None,
-            agent_id: None,
-        };
-        let data: AccountTunnels = self.call("/tunnels/list", &req).await?;
-        Ok(data.tunnels)
-    }
-
-    async fn create_tunnel(
-        &self,
-        name: &str,
-        desired: &DesiredTunnel,
-        agent_id: &str,
-    ) -> Result<String> {
-        // Default to the "global" network when no region is requested. Override
-        // per-tunnel with `spec.region`. (Untested against a live write until an
-        // account API key is available — agent keys are read-only.)
+    async fn create_tunnel(&self, desired: &DesiredTunnel, agent_id: &str) -> Result<String> {
+        // Default to the "global" network when no region is requested; override
+        // per-tunnel with `spec.region`.
         let region = desired
             .region
             .clone()
             .unwrap_or_else(|| "global".to_string());
-        let req = ReqCreate {
-            name: name.to_string(),
-            tunnel_type: None,
-            port_type: port_type_str(desired.protocol).to_string(),
-            port_count: desired.port_count.max(1),
-            origin: OriginCreate::Agent {
-                agent_id: agent_id.to_string(),
-                local_ip: desired.local_ip.clone(),
-                local_port: Some(desired.local_port),
-            },
+        let req = ReqTunnelsCreateV1 {
+            ports: port_details(desired.protocol, desired.port_count.max(1)),
+            origin: OriginCreate::Agent(AgentOrigin {
+                agent_id: Some(agent_id.to_string()),
+                config: local_config(&desired.local_ip, desired.local_port),
+            }),
             enabled: true,
-            alloc: Some(AllocCreate::Region { region }),
+            alloc: Some(AllocRequest::Region(UseAllocRegion { region, port: None })),
+            name: Some(tunnel_name(&desired.key)),
             firewall_id: None,
-            proxy_protocol: None,
         };
-        let obj: ObjectId = self.call("/tunnels/create", &req).await?;
+        let obj: ObjectId = self.call("/v1/tunnels/create", &req).await?;
         Ok(obj.id)
     }
 
-    async fn update_tunnel(
-        &self,
-        tunnel_id: &str,
-        desired: &DesiredTunnel,
-        agent_id: &str,
-    ) -> Result<()> {
-        let req = ReqUpdate {
+    async fn config_tunnel(&self, tunnel_id: &str, desired: &DesiredTunnel) -> Result<()> {
+        let req = ReqTunnelsConfigV1 {
             tunnel_id: tunnel_id.to_string(),
-            local_ip: desired.local_ip.clone(),
-            local_port: Some(desired.local_port),
-            agent_id: Some(agent_id.to_string()),
-            enabled: true,
+            new_agent_id: None,
+            new_config: Some(local_config(&desired.local_ip, desired.local_port)),
         };
-        self.call_raw("/tunnels/update", &req).await?;
+        self.call_raw("/v1/tunnels/config", &req).await?;
         Ok(())
     }
 
     async fn delete_tunnel(&self, tunnel_id: &str) -> Result<()> {
+        // NOTE: the V1 API has no delete endpoint, so this uses the account
+        // `/tunnels/delete`. Verify it works for a self-managed agent's own
+        // tunnels (see CLAUDE.md TODO); it may need a disable instead.
         let req = ReqDelete {
             tunnel_id: tunnel_id.to_string(),
         };
         self.call_raw("/tunnels/delete", &req).await?;
         Ok(())
-    }
-
-    /// Whether the requested custom domain is attached to `tunnel`, returning
-    /// `(ready, host_override)`.
-    ///
-    /// Automatic *attachment* isn't wired up yet: the playit "set tunnel domain"
-    /// endpoint isn't in the public API and would need a write-capable
-    /// credential. So when a domain is requested but not yet attached, this warns
-    /// and reports `ready = false`. Attach it once in the dashboard
-    /// (tunnel → Change domain); the operator then reports it ready and uses it
-    /// as the public address.
-    fn custom_domain_status(
-        &self,
-        desired: &DesiredTunnel,
-        tunnel: &AccountTunnel,
-    ) -> (bool, Option<String>) {
-        let Some(cd) = desired.custom_domain.as_deref() else {
-            return (false, None);
-        };
-        if tunnel.domain.as_ref().map(|d| d.name.as_str()) == Some(cd) {
-            return (true, Some(cd.to_string()));
-        }
-        warn!(
-            "{}: custom domain `{cd}` is requested but not attached to tunnel {}. Automatic \
-             attachment isn't supported yet (the playit domains endpoint isn't public and needs a \
-             write-capable API key); attach it once in the dashboard (tunnel → Change domain) and \
-             the operator will report it as ready.",
-            desired.key, tunnel.id
-        );
-        (false, None)
     }
 }
 
@@ -236,77 +159,65 @@ impl TunnelProvider for PlayitProvider {
                 desired.local_ip
             )));
         }
-        let name = tunnel_name(&desired.key);
-        let agent_id = self.agent_id().await?;
 
-        // Get-or-create the tunnel, then report on it uniformly below.
-        let tunnel = match self
-            .list_tunnels()
-            .await?
-            .into_iter()
-            .find(|t| t.name == name)
+        let name = tunnel_name(&desired.key);
+        let rd = self.rundata().await?;
+
+        let (tunnel_id, address, custom_domain_ready) = match rd
+            .tunnels
+            .iter()
+            .find(|t| t.name.as_deref() == Some(name.as_str()))
         {
             Some(t) => {
-                let addr_matches = t.origin.data.local_ip.as_deref()
-                    == Some(desired.local_ip.as_str())
-                    && t.origin.data.local_port == Some(desired.local_port);
-                if !addr_matches {
-                    if self.read_only {
-                        return Err(read_only_write_error());
-                    }
+                let want_port = desired.local_port.to_string();
+                let drift = t.field("local_ip") != Some(desired.local_ip.as_str())
+                    || t.field("local_port") != Some(want_port.as_str());
+                if drift {
+                    require_self_managed(&rd)?;
                     info!(
                         "{}: updating tunnel {} local address -> {}:{}",
                         desired.key, t.id, desired.local_ip, desired.local_port
                     );
-                    self.update_tunnel(&t.id, desired, &agent_id).await?;
+                    self.config_tunnel(&t.id, desired).await?;
                 }
-                t
+                let cd = custom_domain_ready(desired, t);
+                (t.id.clone(), t.display_address.clone(), cd)
             }
             None => {
-                if self.read_only {
-                    return Err(read_only_write_error());
-                }
+                require_self_managed(&rd)?;
                 info!(
                     "{}: creating playit tunnel `{}` -> {}:{}",
                     desired.key, name, desired.local_ip, desired.local_port
                 );
-                let id = self.create_tunnel(&name, desired, &agent_id).await?;
-                self.list_tunnels()
-                    .await?
-                    .into_iter()
-                    .find(|t| t.id == id)
-                    .ok_or_else(|| {
-                        Error::Provider("created tunnel not found when re-listing".to_string())
-                    })?
+                let id = self.create_tunnel(desired, &rd.agent_id).await?;
+                // Re-fetch so we can report the freshly assigned address.
+                let rd2 = self.rundata().await?;
+                let created = rd2.tunnels.iter().find(|t| t.id == id);
+                let cd = created
+                    .map(|t| custom_domain_ready(desired, t))
+                    .unwrap_or(false);
+                let addr = created.and_then(|t| t.display_address.clone());
+                (id, addr, cd)
             }
         };
 
-        let (custom_domain_ready, cd_host) = self.custom_domain_status(desired, &tunnel);
-        let host = cd_host.or_else(|| tunnel.default_host());
-        let address = match (host, tunnel.port()) {
-            (Some(h), Some(p)) => format!("{h}:{p}"),
-            (Some(h), None) => h,
-            _ => String::new(),
-        };
         Ok(ProvisionedTunnel {
-            tunnel_id: tunnel.id.clone(),
-            address,
+            tunnel_id,
+            address: address.unwrap_or_default(),
             custom_domain_ready,
         })
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
         let name = tunnel_name(key);
-        match self
-            .list_tunnels()
-            .await?
-            .into_iter()
-            .find(|t| t.name == name)
+        let rd = self.rundata().await?;
+        match rd
+            .tunnels
+            .iter()
+            .find(|t| t.name.as_deref() == Some(name.as_str()))
         {
             Some(t) => {
-                if self.read_only {
-                    return Err(read_only_write_error());
-                }
+                require_self_managed(&rd)?;
                 info!("deleting playit tunnel {} ({name})", t.id);
                 self.delete_tunnel(&t.id).await
             }
@@ -318,73 +229,127 @@ impl TunnelProvider for PlayitProvider {
     }
 }
 
+/// Guard: writes only work for a self-managed agent.
+fn require_self_managed(rd: &AgentRunDataV1) -> Result<()> {
+    if rd.permissions.is_self_managed {
+        Ok(())
+    } else {
+        Err(Error::Provider(
+            "this playit agent is not self-managed, so it can't create or modify tunnels. Claim a \
+             self-managed agent (agent_type=self-managed) and give the operator its key via \
+             PLAYIT_AGENT_KEY — see CLAUDE.md 'The way forward'."
+                .to_string(),
+        ))
+    }
+}
+
+/// Whether the tunnel's current public address already is the requested custom
+/// domain. Automatic *attachment* isn't implemented (the playit domains-set
+/// endpoint isn't public); attach it once in the dashboard and this reports it.
+fn custom_domain_ready(desired: &DesiredTunnel, tunnel: &AgentTunnelV1) -> bool {
+    let Some(cd) = desired.custom_domain.as_deref() else {
+        return false;
+    };
+    let host = tunnel
+        .display_address
+        .as_deref()
+        .map(|a| a.split(':').next().unwrap_or(a));
+    if host == Some(cd) {
+        return true;
+    }
+    warn!(
+        "{}: custom domain `{cd}` is requested but not attached to tunnel {}. Automatic attachment \
+         isn't supported yet (the playit domains endpoint isn't public); attach it once in the \
+         dashboard (tunnel → Change domain) and the operator will report it as ready.",
+        desired.key, tunnel.id
+    );
+    false
+}
+
 fn tunnel_name(key: &str) -> String {
     format!("k8s/{key}")
 }
 
-fn port_type_str(p: Protocol) -> &'static str {
+fn port_details(p: Protocol, count: u16) -> PortDetails {
     match p {
-        Protocol::Tcp => "tcp",
-        Protocol::Udp => "udp",
-        Protocol::Both => "both",
+        Protocol::Tcp => PortDetails::CustomTcp(count),
+        Protocol::Udp => PortDetails::CustomUdp(count),
+        Protocol::Both => PortDetails::CustomBoth(count),
     }
 }
 
-fn read_only_write_error() -> Error {
-    Error::Provider(
-        "credential is read-only (agent keys cannot create/modify tunnels); set a write-capable \
-         account API key via PLAYIT_API_KEY"
-            .to_string(),
-    )
+fn local_config(ip: &str, port: u16) -> AgentTunnelConfig {
+    AgentTunnelConfig {
+        fields: vec![
+            AgentTunnelAttr {
+                name: "local_ip".to_string(),
+                value: ip.to_string(),
+            },
+            AgentTunnelAttr {
+                name: "local_port".to_string(),
+                value: port.to_string(),
+            },
+        ],
+    }
 }
 
-// --- request bodies ---------------------------------------------------------
+// --- request bodies (V1) ----------------------------------------------------
 
 #[derive(Serialize)]
 struct Empty {}
 
 #[derive(Serialize)]
-struct ReqList {
-    tunnel_id: Option<String>,
-    agent_id: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ReqCreate {
-    name: String,
-    tunnel_type: Option<String>,
-    port_type: String,
-    port_count: u16,
+struct ReqTunnelsCreateV1 {
+    ports: PortDetails,
     origin: OriginCreate,
     enabled: bool,
-    alloc: Option<AllocCreate>,
+    alloc: Option<AllocRequest>,
+    name: Option<String>,
     firewall_id: Option<String>,
-    proxy_protocol: Option<String>,
 }
 
 #[derive(Serialize)]
-#[serde(tag = "type", content = "data", rename_all = "lowercase")]
+#[serde(tag = "type", content = "details")]
+enum PortDetails {
+    #[serde(rename = "custom-tcp")]
+    CustomTcp(u16),
+    #[serde(rename = "custom-udp")]
+    CustomUdp(u16),
+    #[serde(rename = "custom-both")]
+    CustomBoth(u16),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", content = "details")]
 enum OriginCreate {
-    Agent {
-        agent_id: String,
-        local_ip: String,
-        local_port: Option<u16>,
-    },
+    #[serde(rename = "agent")]
+    Agent(AgentOrigin),
 }
 
 #[derive(Serialize)]
-#[serde(tag = "type", content = "details", rename_all = "kebab-case")]
-enum AllocCreate {
-    Region { region: String },
-}
-
-#[derive(Serialize)]
-struct ReqUpdate {
-    tunnel_id: String,
-    local_ip: String,
-    local_port: Option<u16>,
+struct AgentOrigin {
     agent_id: Option<String>,
-    enabled: bool,
+    config: AgentTunnelConfig,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", content = "details")]
+enum AllocRequest {
+    #[serde(rename = "region")]
+    Region(UseAllocRegion),
+}
+
+#[derive(Serialize)]
+struct UseAllocRegion {
+    region: String,
+    port: Option<u16>,
+}
+
+#[derive(Serialize)]
+struct ReqTunnelsConfigV1 {
+    tunnel_id: String,
+    new_agent_id: Option<String>,
+    new_config: Option<AgentTunnelConfig>,
 }
 
 #[derive(Serialize)]
@@ -392,7 +357,21 @@ struct ReqDelete {
     tunnel_id: String,
 }
 
-// --- response bodies (only the fields we use) -------------------------------
+/// Agent tunnel config — a schema-based `{fields: [{name, value}]}` blob. Used
+/// both when writing (create/config) and reading (rundata).
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct AgentTunnelConfig {
+    #[serde(default)]
+    fields: Vec<AgentTunnelAttr>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct AgentTunnelAttr {
+    name: String,
+    value: String,
+}
+
+// --- response bodies (V1, only the fields we use) ---------------------------
 
 #[derive(Deserialize)]
 struct ObjectId {
@@ -400,71 +379,36 @@ struct ObjectId {
 }
 
 #[derive(Deserialize)]
-struct AgentRunData {
+struct AgentRunDataV1 {
     agent_id: String,
+    #[serde(default)]
+    tunnels: Vec<AgentTunnelV1>,
+    permissions: AgentPermissions,
 }
 
 #[derive(Deserialize)]
-struct AccountTunnels {
-    tunnels: Vec<AccountTunnel>,
+struct AgentPermissions {
+    is_self_managed: bool,
 }
 
 #[derive(Deserialize)]
-struct AccountTunnel {
+struct AgentTunnelV1 {
     id: String,
-    name: String,
-    alloc: TunnelAlloc,
-    origin: TunnelOrigin,
     #[serde(default)]
-    domain: Option<TunnelDomain>,
+    name: Option<String>,
+    /// Best public address, e.g. `host:port` or a custom domain.
+    #[serde(default)]
+    display_address: Option<String>,
+    #[serde(default)]
+    agent_config: AgentTunnelConfig,
 }
 
-impl AccountTunnel {
-    /// The public port allocated to the tunnel, if allocated.
-    fn port(&self) -> Option<u16> {
-        self.alloc.data.as_ref().and_then(|d| d.port_start)
+impl AgentTunnelV1 {
+    fn field(&self, name: &str) -> Option<&str> {
+        self.agent_config
+            .fields
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.value.as_str())
     }
-
-    /// The best public hostname for the tunnel: its attached custom domain if
-    /// present, otherwise the playit-assigned domain.
-    fn default_host(&self) -> Option<String> {
-        self.domain.as_ref().map(|d| d.name.clone()).or_else(|| {
-            self.alloc
-                .data
-                .as_ref()
-                .and_then(|d| d.assigned_domain.clone())
-        })
-    }
-}
-
-#[derive(Deserialize)]
-struct TunnelAlloc {
-    #[serde(default)]
-    data: Option<AllocData>,
-}
-
-#[derive(Deserialize)]
-struct AllocData {
-    #[serde(default)]
-    assigned_domain: Option<String>,
-    #[serde(default)]
-    port_start: Option<u16>,
-}
-
-#[derive(Deserialize)]
-struct TunnelOrigin {
-    data: OriginData,
-}
-
-#[derive(Deserialize)]
-struct OriginData {
-    #[serde(default)]
-    local_ip: Option<String>,
-    #[serde(default)]
-    local_port: Option<u16>,
-}
-
-#[derive(Deserialize)]
-struct TunnelDomain {
-    name: String,
 }

@@ -30,20 +30,16 @@ spec:
             # Set to "playit" and provide a credential below to use the real API.
             - name: PLAYIT_PROVIDER
               value: "dry-run"
-            # Preferred: a write-capable account API key (create/update/delete).
-            # - name: PLAYIT_API_KEY
-            #   valueFrom:
-            #     secretKeyRef:
-            #       name: playit-operator-credentials
-            #       key: api-key
-            # Fallback: an agent secret key. READ-ONLY — good for listing, but
-            # playit rejects tunnel creation/updates with it. Same value as the
-            # agent's SECRET_KEY.
+            # The credential: a SELF-MANAGED agent's secret key. A self-managed
+            # agent can create/modify its own tunnels via the playit V1 API.
+            # (An assignable agent is read-only and cannot create tunnels.)
             # - name: PLAYIT_AGENT_KEY
             #   valueFrom:
             #     secretKeyRef:
             #       name: playit-operator-credentials
             #       key: agent-key
+            # PLAYIT_API_KEY still exists but is a dead path — playit cancelled
+            # account API keys (abuse). Don't rely on it.
             - name: RUST_LOG
               value: "info"
           securityContext:

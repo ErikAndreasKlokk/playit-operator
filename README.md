@@ -6,12 +6,12 @@ Cloudflare Tunnel ingress controller, so you can expose in-cluster services to
 the internet declaratively instead of clicking around the playit dashboard.
 
 > **Status: early / alpha.** The full control loop (watch, finalizers, status,
-> Service resolution) works today. The real playit.gg API provider is
-> implemented (`list`/`create`/`update`/`delete`), but the **write path is
-> untested end-to-end** because it needs a write-capable account API key — see
-> [Credentials](#credentials-playit_providerplayit) and [Roadmap](#roadmap). The
-> **dry-run** provider is the default and needs no credentials. Contributions
-> welcome.
+> Service resolution) works today. The real provider targets the playit **V1
+> API** as a **self-managed agent** (`list`/`create`/`update`/`delete`); the
+> **write path is implemented but not yet verified end-to-end** — it needs a
+> self-managed agent key to test. The **dry-run** provider is the default and
+> needs no credentials. See [Credentials](#credentials-playit_providerplayit) and
+> `CLAUDE.md`. Contributions welcome.
 
 ## Why this exists
 
@@ -53,17 +53,17 @@ Provider selection is via environment variable:
 
 ### Credentials (`PLAYIT_PROVIDER=playit`)
 
-| Env var | Auth header | Capability |
-| --- | --- | --- |
-| `PLAYIT_API_KEY` | `Api-Key <v>` | **Write** — create/update/delete tunnels. Preferred. |
-| `PLAYIT_AGENT_KEY` | `Agent-Key <v>` | **Read-only** — listing works, but playit rejects writes with `NotAllowedWithReadOnly`. Same value as the agent's `SECRET_KEY`. |
+The operator uses the playit **V1 API** as a **self-managed agent**.
 
-> ⚠️ **Heads up on credentials.** playit **agent keys are read-only** for tunnel
-> management, so they can't actually create tunnels — the operator will surface a
-> clear error until a write-capable key is supplied. Account **API keys** are the
-> write path, but at time of writing they aren't available on all accounts (the
-> account "API Keys" page may be empty). The operator already speaks both, so the
-> day you can mint an API key, just set `PLAYIT_API_KEY` — no code change.
+| Env var | Auth header | Notes |
+| --- | --- | --- |
+| `PLAYIT_AGENT_KEY` | `Agent-Key <v>` | **The credential.** Must be a *self-managed* agent's secret. Self-managed agents can create/modify their own tunnels; assignable agents are read-only. |
+| `PLAYIT_API_KEY` | `Api-Key <v>` | Dead path — playit **cancelled** account API keys (abuse). Kept only for completeness. |
+
+> ⚠️ **You need a *self-managed* agent.** A normal (assignable) agent key is
+> read-only and the operator will refuse writes with a clear error. Claim a
+> self-managed agent (`agent_type: self-managed`) and pass its secret as
+> `PLAYIT_AGENT_KEY`. See `CLAUDE.md` → *The way forward* for the claim flow.
 
 ## Custom resource
 
@@ -118,12 +118,13 @@ tools, or build in the provided Docker image). CI builds on Linux.
 
 ## Roadmap
 
-- [x] Wire `PlayitProvider` to the real playit.gg API — `tunnels/list`,
-      `tunnels/create`, `tunnels/update`, `tunnels/delete`, with `origin=agent`
-      pointed at the Service ClusterIP. Auth via `Agent-Key`/`Api-Key`.
-- [ ] Verify the write path end-to-end against a live account (blocked on a
-      write-capable API key — agent keys are read-only; create/update/delete are
-      implemented from the API types but untested against a real write).
+- [x] Wire `PlayitProvider` to the playit **V1 API** as a self-managed agent —
+      `/v1/agents/rundata` (read), `/v1/tunnels/create`, `/v1/tunnels/config`
+      (update local address), delete — with `origin=agent` pointed at the Service
+      ClusterIP. Refuses writes if the agent isn't self-managed.
+- [ ] Verify the write path end-to-end with a real self-managed agent key
+      (create → update → delete a throwaway tunnel). Confirm delete works for
+      self-managed (V1 has no delete endpoint) and `alloc`/region behaviour.
 - [~] **Custom domains** — *partially implemented*. The operator now detects
       whether `spec.customDomain` is attached to the tunnel (via the tunnel's
       `domain` field), reports it in `status.customDomainReady`, and uses the
