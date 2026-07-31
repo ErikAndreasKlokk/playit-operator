@@ -5,13 +5,12 @@ A Kubernetes operator that turns a `PlayitTunnel` custom resource into a live
 Cloudflare Tunnel ingress controller, so you can expose in-cluster services to
 the internet declaratively instead of clicking around the playit dashboard.
 
-> **Status: early / alpha.** The full control loop (watch, finalizers, status,
-> Service resolution) works today. The real provider targets the playit **V1
-> API** as a **self-managed agent** (`list`/`create`/`update`/`delete`); the
-> **write path is implemented but not yet verified end-to-end** — it needs a
-> self-managed agent key to test. The **dry-run** provider is the default and
-> needs no credentials. See [Credentials](#credentials-playit_providerplayit) and
-> `CLAUDE.md`. Contributions welcome.
+> **Status: working.** The operator drives the playit **V1 API** as a
+> **self-managed agent** (`list`/`create`/`config`/`delete`), verified end-to-end
+> and running in a real homelab. It automates **TCP/UDP** tunnels. HTTPS web apps
+> are a special case it can't fully automate (playit HTTPS needs a domain-bound
+> gateway + local TLS termination) — see `CLAUDE.md`. The **dry-run** provider is
+> the default and needs no credentials. Contributions welcome.
 
 ## Why this exists
 
