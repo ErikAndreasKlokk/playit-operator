@@ -101,6 +101,9 @@ async fn apply(tunnel: Arc<PlayitTunnel>, ctx: &Arc<Context>, ns: &str) -> Resul
     match ctx.provider.ensure(&desired).await {
         Ok(t) => {
             info!("{key}: tunnel ready at {}", t.address);
+            // Right after create the public address may not be allocated yet;
+            // re-check soon until it is, then fall back to periodic drift checks.
+            let address_pending = t.address.is_empty();
             let status = PlayitTunnelStatus {
                 phase: Some("Ready".into()),
                 tunnel_id: Some(t.tunnel_id),
@@ -110,8 +113,8 @@ async fn apply(tunnel: Arc<PlayitTunnel>, ctx: &Arc<Context>, ns: &str) -> Resul
                 message: Some("tunnel provisioned".into()),
             };
             patch_status(ctx, ns, &name, tunnel.status.as_ref(), status).await?;
-            // Steady state: re-check periodically to detect and repair drift.
-            Ok(Action::requeue(Duration::from_secs(300)))
+            let requeue = if address_pending { 10 } else { 300 };
+            Ok(Action::requeue(Duration::from_secs(requeue)))
         }
         Err(e) => {
             warn!("{key}: provider.ensure failed: {e}");
