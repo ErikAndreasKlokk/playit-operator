@@ -272,9 +272,9 @@ fn tunnel_name(key: &str) -> String {
 
 fn port_details(p: Protocol, count: u16) -> PortDetails {
     match p {
-        Protocol::Tcp => PortDetails::CustomTcp(count),
-        Protocol::Udp => PortDetails::CustomUdp(count),
-        Protocol::Both => PortDetails::CustomBoth(count),
+        Protocol::Tcp => PortDetails::Tcp(count),
+        Protocol::Udp => PortDetails::Udp(count),
+        Protocol::Both => PortDetails::Both(count),
     }
 }
 
@@ -312,11 +312,11 @@ struct ReqTunnelsCreateV1 {
 #[serde(tag = "type", content = "details")]
 enum PortDetails {
     #[serde(rename = "custom-tcp")]
-    CustomTcp(u16),
+    Tcp(u16),
     #[serde(rename = "custom-udp")]
-    CustomUdp(u16),
+    Udp(u16),
     #[serde(rename = "custom-both")]
-    CustomBoth(u16),
+    Both(u16),
 }
 
 #[derive(Serialize)]
