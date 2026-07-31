@@ -95,9 +95,8 @@ async fn apply(tunnel: Arc<PlayitTunnel>, ctx: &Arc<Context>, ns: &str) -> Resul
         .and_then(|s| s.cluster_ip.clone())
         .filter(|ip| ip != "None")
         .unwrap_or_else(|| format!("{}.{ns}.svc.cluster.local", spec.service_name));
-    let local_target = format!("{cluster_ip}:{}", spec.port);
 
-    let desired = DesiredTunnel::from_spec(key.clone(), spec, local_target);
+    let desired = DesiredTunnel::from_spec(key.clone(), spec, cluster_ip);
 
     match ctx.provider.ensure(&desired).await {
         Ok(t) => {

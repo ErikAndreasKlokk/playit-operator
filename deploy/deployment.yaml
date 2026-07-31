@@ -27,14 +27,23 @@ spec:
           imagePullPolicy: Always
           env:
             # dry-run (default) logs intended API calls without touching playit.
-            # Set to "playit" and provide PLAYIT_API_KEY to enable the real API.
+            # Set to "playit" and provide a credential below to use the real API.
             - name: PLAYIT_PROVIDER
               value: "dry-run"
+            # Preferred: a write-capable account API key (create/update/delete).
             # - name: PLAYIT_API_KEY
             #   valueFrom:
             #     secretKeyRef:
             #       name: playit-operator-credentials
             #       key: api-key
+            # Fallback: an agent secret key. READ-ONLY — good for listing, but
+            # playit rejects tunnel creation/updates with it. Same value as the
+            # agent's SECRET_KEY.
+            # - name: PLAYIT_AGENT_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: playit-operator-credentials
+            #       key: agent-key
             - name: RUST_LOG
               value: "info"
           securityContext:

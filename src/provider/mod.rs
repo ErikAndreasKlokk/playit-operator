@@ -21,25 +21,26 @@ pub struct DesiredTunnel {
     /// Stable key (`namespace/name`) correlating a CR with a playit tunnel.
     pub key: String,
     pub protocol: Protocol,
-    pub port: u16,
     pub port_count: u16,
     pub region: Option<String>,
     pub custom_domain: Option<String>,
-    /// In-cluster target the agent forwards to, e.g. `10.0.0.5:8080`.
-    pub local_target: String,
+    /// In-cluster IP the agent forwards to (the target Service's ClusterIP).
+    pub local_ip: String,
+    /// Port on the target Service.
+    pub local_port: u16,
 }
 
 impl DesiredTunnel {
-    /// Build a [`DesiredTunnel`] from a spec and the resolved cluster target.
-    pub fn from_spec(key: String, spec: &PlayitTunnelSpec, local_target: String) -> Self {
+    /// Build a [`DesiredTunnel`] from a spec and the resolved cluster IP.
+    pub fn from_spec(key: String, spec: &PlayitTunnelSpec, local_ip: String) -> Self {
         Self {
             key,
             protocol: spec.protocol,
-            port: spec.port,
             port_count: spec.port_count,
             region: spec.region.clone(),
             custom_domain: spec.custom_domain.clone(),
-            local_target,
+            local_ip,
+            local_port: spec.port,
         }
     }
 }
@@ -68,4 +69,4 @@ mod dryrun;
 mod playit;
 
 pub use dryrun::DryRunProvider;
-pub use playit::PlayitProvider;
+pub use playit::{PlayitCredential, PlayitProvider};

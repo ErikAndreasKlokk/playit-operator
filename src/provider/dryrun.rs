@@ -26,12 +26,12 @@ impl DryRunProvider {
 impl TunnelProvider for DryRunProvider {
     async fn ensure(&self, desired: &DesiredTunnel) -> Result<ProvisionedTunnel> {
         let slug = Self::slug(&desired.key);
-        let address = format!("{slug}.dryrun.playit.gg:{}", desired.port);
+        let address = format!("{slug}.dryrun.playit.gg:{}", desired.local_port);
         info!(
             key = %desired.key,
             protocol = ?desired.protocol,
             port_count = desired.port_count,
-            local_target = %desired.local_target,
+            local = %format!("{}:{}", desired.local_ip, desired.local_port),
             custom_domain = ?desired.custom_domain,
             "[dry-run] would ensure playit tunnel -> {address}"
         );

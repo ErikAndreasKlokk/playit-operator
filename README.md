@@ -6,9 +6,12 @@ Cloudflare Tunnel ingress controller, so you can expose in-cluster services to
 the internet declaratively instead of clicking around the playit dashboard.
 
 > **Status: early / alpha.** The full control loop (watch, finalizers, status,
-> Service resolution) works today against a **dry-run** provider. Talking to the
-> real playit.gg API is stubbed behind a trait and is the next milestone — see
-> [Roadmap](#roadmap). Contributions welcome.
+> Service resolution) works today. The real playit.gg API provider is
+> implemented (`list`/`create`/`update`/`delete`), but the **write path is
+> untested end-to-end** because it needs a write-capable account API key — see
+> [Credentials](#credentials-playit_providerplayit) and [Roadmap](#roadmap). The
+> **dry-run** provider is the default and needs no credentials. Contributions
+> welcome.
 
 ## Why this exists
 
@@ -46,7 +49,21 @@ Provider selection is via environment variable:
 | `PLAYIT_PROVIDER` | Behaviour |
 | --- | --- |
 | unset / `dry-run` (default) | Logs the API calls it *would* make and returns a deterministic fake address. Safe without credentials. |
-| `playit` | Uses the real `https://api.playit.gg` (requires `PLAYIT_API_KEY`). Not yet implemented. |
+| `playit` | Uses the real `https://api.playit.gg`. Requires a credential (below). |
+
+### Credentials (`PLAYIT_PROVIDER=playit`)
+
+| Env var | Auth header | Capability |
+| --- | --- | --- |
+| `PLAYIT_API_KEY` | `Api-Key <v>` | **Write** — create/update/delete tunnels. Preferred. |
+| `PLAYIT_AGENT_KEY` | `Agent-Key <v>` | **Read-only** — listing works, but playit rejects writes with `NotAllowedWithReadOnly`. Same value as the agent's `SECRET_KEY`. |
+
+> ⚠️ **Heads up on credentials.** playit **agent keys are read-only** for tunnel
+> management, so they can't actually create tunnels — the operator will surface a
+> clear error until a write-capable key is supplied. Account **API keys** are the
+> write path, but at time of writing they aren't available on all accounts (the
+> account "API Keys" page may be empty). The operator already speaks both, so the
+> day you can mint an API key, just set `PLAYIT_API_KEY` — no code change.
 
 ## Custom resource
 
@@ -101,11 +118,15 @@ tools, or build in the provided Docker image). CI builds on Linux.
 
 ## Roadmap
 
-- [ ] Wire `PlayitProvider` to the real playit.gg API (`tunnels/create`,
-      `tunnels/list`, `tunnels/update`, `tunnels/delete`) using an account API key.
-- [ ] **Custom domains** — attach a domain to a tunnel (playit Premium). The CR
-      field (`spec.customDomain`) and status (`status.customDomainReady`) already
-      exist so enabling it is non-breaking.
+- [x] Wire `PlayitProvider` to the real playit.gg API — `tunnels/list`,
+      `tunnels/create`, `tunnels/update`, `tunnels/delete`, with `origin=agent`
+      pointed at the Service ClusterIP. Auth via `Agent-Key`/`Api-Key`.
+- [ ] Verify the write path end-to-end against a live account (blocked on a
+      write-capable API key — agent keys are read-only; create/update/delete are
+      implemented from the API types but untested against a real write).
+- [ ] **Custom domains** — attach a domain to a tunnel. The CR field
+      (`spec.customDomain`) and status (`status.customDomainReady`) already exist
+      so enabling it is non-breaking; today the operator warns and ignores it.
 - [ ] Optional: drive tunnels straight from annotated `Service` objects
       (`loadBalancerClass: playit-operator.io/tunnel`) in addition to the CRD.
 - [ ] Optional: emit Kubernetes Events and richer status conditions.
