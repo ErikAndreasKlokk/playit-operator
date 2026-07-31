@@ -78,7 +78,7 @@ fn default_port_count() -> u16 {
 }
 
 /// Observed state of a [`PlayitTunnel`], written to `.status` by the operator.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayitTunnelStatus {
     /// High-level lifecycle phase: `Pending`, `Ready`, or `Error`.

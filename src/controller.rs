@@ -109,7 +109,7 @@ async fn apply(tunnel: Arc<PlayitTunnel>, ctx: &Arc<Context>, ns: &str) -> Resul
                 observed_generation: tunnel.meta().generation,
                 message: Some("tunnel provisioned".into()),
             };
-            patch_status(ctx, ns, &name, status).await?;
+            patch_status(ctx, ns, &name, tunnel.status.as_ref(), status).await?;
             // Steady state: re-check periodically to detect and repair drift.
             Ok(Action::requeue(Duration::from_secs(300)))
         }
@@ -121,7 +121,7 @@ async fn apply(tunnel: Arc<PlayitTunnel>, ctx: &Arc<Context>, ns: &str) -> Resul
                 observed_generation: tunnel.meta().generation,
                 ..Default::default()
             };
-            patch_status(ctx, ns, &name, status).await?;
+            patch_status(ctx, ns, &name, tunnel.status.as_ref(), status).await?;
             Ok(Action::requeue(Duration::from_secs(30)))
         }
     }
@@ -140,8 +140,14 @@ async fn patch_status(
     ctx: &Arc<Context>,
     ns: &str,
     name: &str,
+    current: Option<&PlayitTunnelStatus>,
     status: PlayitTunnelStatus,
 ) -> Result<()> {
+    // Skip the patch when nothing changed — a status write bumps the resource
+    // version and re-triggers reconcile, so patching unconditionally spins.
+    if current == Some(&status) {
+        return Ok(());
+    }
     let api: Api<PlayitTunnel> = Api::namespaced(ctx.client.clone(), ns);
     let patch = json!({
         "apiVersion": "playit-operator.io/v1alpha1",

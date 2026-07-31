@@ -100,9 +100,17 @@ impl PlayitProvider {
             .map_err(|e| Error::Provider(format!("decoding {path} data: {e}")))
     }
 
-    /// Fetch this agent's run data: its id, self-managed status, and its tunnels.
+    /// Fetch this agent's run data: its id and self-managed status.
     async fn rundata(&self) -> Result<AgentRunDataV1> {
         self.call("/v1/agents/rundata", &Empty {}).await
+    }
+
+    /// List the account's tunnels. Unlike `/v1/agents/rundata` (which reflects
+    /// what the agent has synced and lags a just-created tunnel), this is
+    /// immediately consistent after a create — essential for idempotency.
+    async fn list_tunnels(&self) -> Result<Vec<AccountTunnelV1>> {
+        let data: AccountTunnelsV1 = self.call("/v1/tunnels/list", &Empty {}).await?;
+        Ok(data.tunnels)
     }
 
     async fn create_tunnel(&self, desired: &DesiredTunnel, agent_id: &str) -> Result<String> {
@@ -161,9 +169,9 @@ impl TunnelProvider for PlayitProvider {
 
         let name = tunnel_name(&desired.key);
         let rd = self.rundata().await?;
+        let tunnels = self.list_tunnels().await?;
 
-        let (tunnel_id, address, custom_domain_ready) = match rd
-            .tunnels
+        let (tunnel_id, address, custom_domain_ready) = match tunnels
             .iter()
             .find(|t| t.name.as_deref() == Some(name.as_str()))
         {
@@ -180,7 +188,7 @@ impl TunnelProvider for PlayitProvider {
                     self.config_tunnel(&t.id, desired).await?;
                 }
                 let cd = custom_domain_ready(desired, t);
-                (t.id.clone(), t.display_address.clone(), cd)
+                (t.id.clone(), t.address(), cd)
             }
             None => {
                 require_self_managed(&rd)?;
@@ -189,13 +197,14 @@ impl TunnelProvider for PlayitProvider {
                     desired.key, name, desired.local_ip, desired.local_port
                 );
                 let id = self.create_tunnel(desired, &rd.agent_id).await?;
-                // Re-fetch so we can report the freshly assigned address.
-                let rd2 = self.rundata().await?;
-                let created = rd2.tunnels.iter().find(|t| t.id == id);
+                // Re-fetch so we can report the freshly assigned address (may be
+                // empty until the allocation completes; a later reconcile fills it).
+                let created = self.list_tunnels().await?.into_iter().find(|t| t.id == id);
                 let cd = created
+                    .as_ref()
                     .map(|t| custom_domain_ready(desired, t))
                     .unwrap_or(false);
-                let addr = created.and_then(|t| t.display_address.clone());
+                let addr = created.and_then(|t| t.address());
                 (id, addr, cd)
             }
         };
@@ -209,14 +218,13 @@ impl TunnelProvider for PlayitProvider {
 
     async fn delete(&self, key: &str) -> Result<()> {
         let name = tunnel_name(key);
-        let rd = self.rundata().await?;
-        match rd
-            .tunnels
-            .iter()
+        match self
+            .list_tunnels()
+            .await?
+            .into_iter()
             .find(|t| t.name.as_deref() == Some(name.as_str()))
         {
             Some(t) => {
-                require_self_managed(&rd)?;
                 info!("deleting playit tunnel {} ({name})", t.id);
                 self.delete_tunnel(&t.id).await
             }
@@ -245,15 +253,14 @@ fn require_self_managed(rd: &AgentRunDataV1) -> Result<()> {
 /// Whether the tunnel's current public address already is the requested custom
 /// domain. Automatic *attachment* isn't implemented (the playit domains-set
 /// endpoint isn't public); attach it once in the dashboard and this reports it.
-fn custom_domain_ready(desired: &DesiredTunnel, tunnel: &AgentTunnelV1) -> bool {
+fn custom_domain_ready(desired: &DesiredTunnel, tunnel: &AccountTunnelV1) -> bool {
     let Some(cd) = desired.custom_domain.as_deref() else {
         return false;
     };
     let host = tunnel
-        .display_address
-        .as_deref()
-        .map(|a| a.split(':').next().unwrap_or(a));
-    if host == Some(cd) {
+        .address()
+        .map(|a| a.split(':').next().unwrap_or(&a).to_string());
+    if host.as_deref() == Some(cd) {
         return true;
     }
     warn!(
@@ -393,11 +400,10 @@ struct ObjectId {
     id: String,
 }
 
+/// `/v1/agents/rundata` — used only for the agent id and self-managed flag.
 #[derive(Deserialize)]
 struct AgentRunDataV1 {
     agent_id: String,
-    #[serde(default)]
-    tunnels: Vec<AgentTunnelV1>,
     permissions: AgentPermissions,
 }
 
@@ -406,24 +412,73 @@ struct AgentPermissions {
     is_self_managed: bool,
 }
 
+/// `/v1/tunnels/list` response.
 #[derive(Deserialize)]
-struct AgentTunnelV1 {
+struct AccountTunnelsV1 {
+    #[serde(default)]
+    tunnels: Vec<AccountTunnelV1>,
+}
+
+#[derive(Deserialize)]
+struct AccountTunnelV1 {
     id: String,
     #[serde(default)]
     name: Option<String>,
-    /// Best public address, e.g. `host:port` or a custom domain.
+    origin: TunnelOriginV1,
     #[serde(default)]
-    display_address: Option<String>,
-    #[serde(default)]
-    agent_config: AgentTunnelConfig,
+    connect_addresses: Vec<ConnectAddressV1>,
 }
 
-impl AgentTunnelV1 {
+impl AccountTunnelV1 {
+    /// The local-config value for `name` (e.g. `local_ip`, `local_port`).
     fn field(&self, name: &str) -> Option<&str> {
-        self.agent_config
+        self.origin
+            .details
+            .config_data
+            .as_ref()?
             .fields
             .iter()
             .find(|f| f.name == name)
             .map(|f| f.value.as_str())
     }
+
+    /// The friendliest public address (prefer a custom domain, then the auto
+    /// domain), if the allocation has completed.
+    fn address(&self) -> Option<String> {
+        let pick = |kind: &str| {
+            self.connect_addresses
+                .iter()
+                .find(|a| a.kind == kind)
+                .and_then(|a| a.value.address.clone())
+        };
+        pick("domain").or_else(|| pick("auto")).or_else(|| {
+            self.connect_addresses
+                .iter()
+                .find_map(|a| a.value.address.clone())
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct TunnelOriginV1 {
+    details: TunnelOriginDetailsV1,
+}
+
+#[derive(Deserialize)]
+struct TunnelOriginDetailsV1 {
+    #[serde(default)]
+    config_data: Option<AgentTunnelConfig>,
+}
+
+#[derive(Deserialize)]
+struct ConnectAddressV1 {
+    #[serde(rename = "type")]
+    kind: String,
+    value: ConnectAddressValueV1,
+}
+
+#[derive(Deserialize)]
+struct ConnectAddressValueV1 {
+    #[serde(default)]
+    address: Option<String>,
 }
