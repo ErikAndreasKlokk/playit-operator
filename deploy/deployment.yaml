@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playit-operator
+  namespace: playit-operator-system
+  labels:
+    app: playit-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: playit-operator
+  template:
+    metadata:
+      labels:
+        app: playit-operator
+    spec:
+      serviceAccountName: playit-operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: ghcr.io/erikandreasklokk/playit-operator:main
+          imagePullPolicy: Always
+          env:
+            # dry-run (default) logs intended API calls without touching playit.
+            # Set to "playit" and provide PLAYIT_API_KEY to enable the real API.
+            - name: PLAYIT_PROVIDER
+              value: "dry-run"
+            # - name: PLAYIT_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: playit-operator-credentials
+            #       key: api-key
+            - name: RUST_LOG
+              value: "info"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi

@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: playit-operator-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: playit-operator
+  namespace: playit-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: playit-operator
+rules:
+  - apiGroups: ["playit-operator.io"]
+    resources: ["playittunnels"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["playit-operator.io"]
+    resources: ["playittunnels/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["playit-operator.io"]
+    resources: ["playittunnels/finalizers"]
+    verbs: ["update"]
+  # Needed to resolve the target Service a tunnel forwards to.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  # Optional: emit events for observability.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: playit-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: playit-operator
+subjects:
+  - kind: ServiceAccount
+    name: playit-operator
+    namespace: playit-operator-system

@@ -1,0 +1,13 @@
+# Example: expose a Minecraft server Service over a playit TCP tunnel.
+apiVersion: playit-operator.io/v1alpha1
+kind: PlayitTunnel
+metadata:
+  name: minecraft
+  namespace: default
+spec:
+  protocol: tcp
+  serviceName: minecraft
+  port: 25565
+  # portCount: 1
+  # region: eu-central
+  # customDomain: play.example.com   # requires playit Premium (not yet implemented)

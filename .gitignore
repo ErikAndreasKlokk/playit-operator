@@ -1,0 +1,13 @@
+# Rust build artifacts
+/target
+
+# Environment / secrets
+.env
+*.env
+!*.env.example
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
