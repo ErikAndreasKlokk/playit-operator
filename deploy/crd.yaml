@@ -70,6 +70,10 @@ spec:
               serviceName:
                 description: Name of the target `Service`, in the same namespace as this resource.
                 type: string
+              tunnelType:
+                description: playit tunnel type — set to `https` for a TLS-terminating web tunnel (serves the target over HTTPS on a custom domain), or another playit tunnel type (e.g. `minecraft-java`). When set, this overrides `protocol` and `portCount`. Leave unset for a plain TCP/UDP port tunnel.
+                nullable: true
+                type: string
             required:
             - port
             - serviceName
