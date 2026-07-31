@@ -18,7 +18,7 @@ spec:
       serviceAccountName: playit-operator
       securityContext:
         runAsNonRoot: true
-        runAsUser: 10001
+        runAsUser: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:

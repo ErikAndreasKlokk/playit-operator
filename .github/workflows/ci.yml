@@ -25,8 +25,15 @@ jobs:
         run: cargo build --all-targets
       - name: Test
         run: cargo test
+      - name: Generate CRD manifest
+        run: cargo run --bin crdgen > generated-crd.yaml
+      - name: Upload generated CRD
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crd-manifest
+          path: generated-crd.yaml
       - name: CRD manifest is up to date
         run: |
-          cargo run --bin crdgen > /tmp/crd.yaml
-          diff -u deploy/crd.yaml /tmp/crd.yaml \
-            || (echo "::error::deploy/crd.yaml is stale — run 'cargo run --bin crdgen > deploy/crd.yaml'" && exit 1)
+          diff -u deploy/crd.yaml generated-crd.yaml \
+            || (echo "::error::deploy/crd.yaml is stale — download the crd-manifest artifact, or run 'cargo run --bin crdgen > deploy/crd.yaml'" && exit 1)

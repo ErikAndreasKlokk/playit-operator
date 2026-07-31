@@ -14,11 +14,10 @@ COPY . .
 RUN cargo build --release --bin playit-operator
 
 # --- runtime stage -----------------------------------------------------------
-FROM debian:bookworm-slim
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd -u 10001 -r -s /usr/sbin/nologin operator
+# distroless ships ca-certificates and a nonroot user (uid 65532) with no shell
+# or package manager — smaller and no apt/useradd step to flake on. The `cc`
+# variant provides glibc for the dynamically linked binary.
+FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=builder /app/target/release/playit-operator /usr/local/bin/playit-operator
-USER 10001
+USER nonroot
 ENTRYPOINT ["/usr/local/bin/playit-operator"]
