@@ -194,6 +194,36 @@ impl PlayitProvider {
         self.call_raw("/tunnels/delete", &req).await?;
         Ok(())
     }
+
+    /// Whether the requested custom domain is attached to `tunnel`, returning
+    /// `(ready, host_override)`.
+    ///
+    /// Automatic *attachment* isn't wired up yet: the playit "set tunnel domain"
+    /// endpoint isn't in the public API and would need a write-capable
+    /// credential. So when a domain is requested but not yet attached, this warns
+    /// and reports `ready = false`. Attach it once in the dashboard
+    /// (tunnel → Change domain); the operator then reports it ready and uses it
+    /// as the public address.
+    fn custom_domain_status(
+        &self,
+        desired: &DesiredTunnel,
+        tunnel: &AccountTunnel,
+    ) -> (bool, Option<String>) {
+        let Some(cd) = desired.custom_domain.as_deref() else {
+            return (false, None);
+        };
+        if tunnel.domain.as_ref().map(|d| d.name.as_str()) == Some(cd) {
+            return (true, Some(cd.to_string()));
+        }
+        warn!(
+            "{}: custom domain `{cd}` is requested but not attached to tunnel {}. Automatic \
+             attachment isn't supported yet (the playit domains endpoint isn't public and needs a \
+             write-capable API key); attach it once in the dashboard (tunnel → Change domain) and \
+             the operator will report it as ready.",
+            desired.key, tunnel.id
+        );
+        (false, None)
+    }
 }
 
 #[async_trait]
@@ -206,61 +236,62 @@ impl TunnelProvider for PlayitProvider {
                 desired.local_ip
             )));
         }
-        if desired.custom_domain.is_some() {
-            warn!(
-                "{}: spec.customDomain is set but custom-domain attachment isn't implemented yet \
-                 (roadmap) — ignoring it",
-                desired.key
-            );
-        }
-
         let name = tunnel_name(&desired.key);
         let agent_id = self.agent_id().await?;
 
-        if let Some(t) = self
+        // Get-or-create the tunnel, then report on it uniformly below.
+        let tunnel = match self
             .list_tunnels()
             .await?
             .into_iter()
             .find(|t| t.name == name)
         {
-            let addr_matches = t.origin.data.local_ip.as_deref() == Some(desired.local_ip.as_str())
-                && t.origin.data.local_port == Some(desired.local_port);
-            if !addr_matches {
+            Some(t) => {
+                let addr_matches = t.origin.data.local_ip.as_deref()
+                    == Some(desired.local_ip.as_str())
+                    && t.origin.data.local_port == Some(desired.local_port);
+                if !addr_matches {
+                    if self.read_only {
+                        return Err(read_only_write_error());
+                    }
+                    info!(
+                        "{}: updating tunnel {} local address -> {}:{}",
+                        desired.key, t.id, desired.local_ip, desired.local_port
+                    );
+                    self.update_tunnel(&t.id, desired, &agent_id).await?;
+                }
+                t
+            }
+            None => {
                 if self.read_only {
                     return Err(read_only_write_error());
                 }
                 info!(
-                    "{}: updating tunnel {} local address -> {}:{}",
-                    desired.key, t.id, desired.local_ip, desired.local_port
+                    "{}: creating playit tunnel `{}` -> {}:{}",
+                    desired.key, name, desired.local_ip, desired.local_port
                 );
-                self.update_tunnel(&t.id, desired, &agent_id).await?;
+                let id = self.create_tunnel(&name, desired, &agent_id).await?;
+                self.list_tunnels()
+                    .await?
+                    .into_iter()
+                    .find(|t| t.id == id)
+                    .ok_or_else(|| {
+                        Error::Provider("created tunnel not found when re-listing".to_string())
+                    })?
             }
-            return Ok(ProvisionedTunnel {
-                tunnel_id: t.id.clone(),
-                address: t.address().unwrap_or_default(),
-                custom_domain_ready: false,
-            });
-        }
+        };
 
-        if self.read_only {
-            return Err(read_only_write_error());
-        }
-        info!(
-            "{}: creating playit tunnel `{}` -> {}:{}",
-            desired.key, name, desired.local_ip, desired.local_port
-        );
-        let id = self.create_tunnel(&name, desired, &agent_id).await?;
-        let address = self
-            .list_tunnels()
-            .await?
-            .into_iter()
-            .find(|t| t.id == id)
-            .and_then(|t| t.address())
-            .unwrap_or_default();
+        let (custom_domain_ready, cd_host) = self.custom_domain_status(desired, &tunnel);
+        let host = cd_host.or_else(|| tunnel.default_host());
+        let address = match (host, tunnel.port()) {
+            (Some(h), Some(p)) => format!("{h}:{p}"),
+            (Some(h), None) => h,
+            _ => String::new(),
+        };
         Ok(ProvisionedTunnel {
-            tunnel_id: id,
+            tunnel_id: tunnel.id.clone(),
             address,
-            custom_domain_ready: false,
+            custom_domain_ready,
         })
     }
 
@@ -389,16 +420,20 @@ struct AccountTunnel {
 }
 
 impl AccountTunnel {
-    /// Public `host:port` the tunnel is reachable at, if allocated.
-    fn address(&self) -> Option<String> {
-        let data = self.alloc.data.as_ref()?;
-        let host = self
-            .domain
-            .as_ref()
-            .map(|d| d.name.clone())
-            .or_else(|| data.assigned_domain.clone())?;
-        let port = data.port_start?;
-        Some(format!("{host}:{port}"))
+    /// The public port allocated to the tunnel, if allocated.
+    fn port(&self) -> Option<u16> {
+        self.alloc.data.as_ref().and_then(|d| d.port_start)
+    }
+
+    /// The best public hostname for the tunnel: its attached custom domain if
+    /// present, otherwise the playit-assigned domain.
+    fn default_host(&self) -> Option<String> {
+        self.domain.as_ref().map(|d| d.name.clone()).or_else(|| {
+            self.alloc
+                .data
+                .as_ref()
+                .and_then(|d| d.assigned_domain.clone())
+        })
     }
 }
 

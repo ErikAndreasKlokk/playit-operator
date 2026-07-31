@@ -124,9 +124,14 @@ tools, or build in the provided Docker image). CI builds on Linux.
 - [ ] Verify the write path end-to-end against a live account (blocked on a
       write-capable API key — agent keys are read-only; create/update/delete are
       implemented from the API types but untested against a real write).
-- [ ] **Custom domains** — attach a domain to a tunnel. The CR field
-      (`spec.customDomain`) and status (`status.customDomainReady`) already exist
-      so enabling it is non-breaking; today the operator warns and ignores it.
+- [~] **Custom domains** — *partially implemented*. The operator now detects
+      whether `spec.customDomain` is attached to the tunnel (via the tunnel's
+      `domain` field), reports it in `status.customDomainReady`, and uses the
+      custom domain as the public `status.address`. **Automatic attachment** is
+      still pending: the playit "set tunnel domain" endpoint isn't in the public
+      API (only `/domains/list`, which returns empty for agent keys) and it's a
+      write op, so today you attach the domain once in the dashboard and the
+      operator keeps it. Full auto-attach needs the endpoint + a write key.
 - [ ] Optional: drive tunnels straight from annotated `Service` objects
       (`loadBalancerClass: playit-operator.io/tunnel`) in addition to the CRD.
 - [ ] Optional: emit Kubernetes Events and richer status conditions.
