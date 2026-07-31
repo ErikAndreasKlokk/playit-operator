@@ -364,6 +364,11 @@ struct ReqDelete {
 // --- response bodies (only the fields we use) -------------------------------
 
 #[derive(Deserialize)]
+struct ObjectId {
+    id: String,
+}
+
+#[derive(Deserialize)]
 struct AgentRunData {
     agent_id: String,
 }
