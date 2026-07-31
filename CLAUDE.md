@@ -28,16 +28,20 @@ controller: it reconciles Kubernetes objects into provider-side API state.
 | --- | --- |
 | Control loop (watch, finalizer, status, Service resolution) | ✅ done |
 | Dry-run provider (default, no creds) | ✅ done |
-| Real provider: `list` tunnels | ✅ done, verified live (read) |
-| Real provider: `create` / `update` / `delete` | ⚠️ implemented, **untested** (needs a write credential — see Blocker) |
-| Dual credential (agent key + API key) | ✅ done |
+| Real provider: `list` tunnels (account `/tunnels/list`) | ✅ done, verified live (read) |
+| Real provider: `create`/`update`/`delete` (account `/tunnels/*`) | ⚠️ implemented but a **dead end** — see below |
+| Dual credential (agent key + API key) | ✅ done, but API keys are cancelled (abuse) |
 | Custom domains: detect / report / use in address | ✅ done |
-| Custom domains: **automatic attach** | ❌ blocked (endpoint not public + write credential) |
 | CI (fmt, clippy `-D warnings`, build, test, CRD drift) | ✅ green |
 | Docker image publish to GHCR | ✅ green |
+| **Self-managed agent + V1 API write path** | 🔜 **the way forward — not yet implemented** |
 
-**One thing gates the rest: playit account API keys.** See
-[The blocker](#the-blocker-account-api-keys).
+**Read this before continuing.** The original plan (account API key → account
+`/tunnels/*` write endpoints) is **dead**: playit paused API keys indefinitely due
+to abuse (confirmed by support, 2026). The account `/tunnels/create` etc. that the
+provider currently implements return `NotAllowedWithReadOnly` for agent keys and
+there's no key that unlocks them. **The viable path is a self-managed agent using
+the V1 API** — see [The way forward](#the-way-forward-self-managed-agent--v1-api).
 
 ## Architecture / layout
 
@@ -100,14 +104,20 @@ null }`. `local_ip` is the target Service's **ClusterIP** (the playit agent, whi
 runs in-cluster, forwards there). A domain attached to a tunnel appears on the
 tunnel object as `domain: {id, name}`.
 
-### 🔑 The single most important finding
+### 🔑 The two most important findings
 
-**playit *agent keys are read-only* for account/tunnel operations.** Verified
-live: `/agents/rundata` and `/tunnels/list` return `200`, but `/tunnels/create`
-returns `{"type":"auth","message":"NotAllowedWithReadOnly"}`. So the agent key
-you already have (the agent's `SECRET_KEY`) **cannot create or modify tunnels or
-attach domains** — it can only read. Writes require a **write-capable account API
-key** (`Api-Key`).
+1. **Account `/tunnels/*` writes need account auth that doesn't exist.** An
+   *assignable* agent key (what a normal agent has, `is_self_managed: false`) is
+   read-only on the account API: `/agents/rundata` and `/tunnels/list` return
+   `200`, but `/tunnels/create` returns
+   `{"type":"auth","message":"NotAllowedWithReadOnly"}`. The only thing that would
+   unlock these is an account API key — **which playit has cancelled** (abuse).
+   So the currently-implemented account-`/tunnels/*` write path is a dead end.
+
+2. **Self-managed agents can create their own tunnels via the V1 API.** An agent
+   claimed as `self-managed` (`permissions.is_self_managed: true`) uses
+   `/v1/tunnels/create` with *its own agent key* — no account API key. This is how
+   the official Minecraft plugin works and it's the path forward.
 
 ## Credentials & provider selection
 
@@ -119,46 +129,93 @@ key** (`Api-Key`).
   - `PLAYIT_AGENT_KEY` → `Agent-Key` header → **read-only** (same value as the
     agent `SECRET_KEY`); listing works, writes fail with a clear error.
 
-Modelled by the `PlayitCredential` enum in `provider/playit.rs`. Adding the API
-key when it becomes available is a config-only change — no code edit.
+Modelled by the `PlayitCredential` enum in `provider/playit.rs`. **Note:** the
+`Api-Key` variant is now effectively dead (playit cancelled account API keys). The
+real path uses a *self-managed* `Agent-Key` against the **V1** endpoints — the
+current provider still targets the account `/tunnels/*` endpoints, so this is the
+main pending rework. See [The way forward](#the-way-forward-self-managed-agent--v1-api).
 
-## The blocker: account API keys
+## The way forward: self-managed agent + V1 API
 
-Both remaining write features — **tunnel create/update/delete** and **custom
-domain attach** — need a write-capable account API key. At the time of writing,
-account API keys are **not available** on the maintainer's account (the
-`Account → API Keys` page exists but is empty, no "create" button). The
-maintainer is checking with playit (Discord) whether/when they can be enabled.
+playit **cancelled account API keys indefinitely** (abuse — confirmed by support,
+2026), so the `Api-Key`/account-`/tunnels/*` path is dead. Instead, use a
+**self-managed agent**. Reference implementation: the official
+[`playit-minecraft-plugin`](https://github.com/playit-cloud/playit-minecraft-plugin)
+(`PlayitKeysSetup.java` = claim flow, `PlayitManager.java#ensureTunnelExists` =
+V1 create).
 
-Until then:
-- The **read** paths (list, detect attached domains, report status) work with the
-  agent key.
-- The **write** paths are implemented from the verified API types but are
-  **untested end-to-end** and will return a clear "credential is read-only" error
-  if run with an agent key.
+### 1. Provision a self-managed agent key (one-time, semi-interactive claim)
 
-There is a fragile alternative (the dashboard's `__Secure-WebAuth` session
-cookie) that was **deliberately not implemented** — it expires, is unofficial,
-and adds work to remove later.
+```
+POST /claim/setup    {code, agent_type: "self-managed", version}  → status (UserAccepted / WaitingForUser / ...)
+   ↳ user opens https://playit.gg/claim/<code> and accepts
+POST /claim/exchange {code}                                       → {secret_key}   # the self-managed agent key
+```
+
+`code` is random hex (the plugin uses 8 random bytes). Poll `/claim/setup` until
+`UserAccepted`, then `/claim/exchange`. Verify with `/v1/agents/rundata` — it
+should show `permissions.is_self_managed: true`.
+
+### 2. Create/manage tunnels with that key via the V1 API
+
+Auth is the same `Agent-Key <secret>` header; the endpoints differ from the
+account API:
+
+| Path | Purpose | Body (key fields) |
+| --- | --- | --- |
+| `/v1/tunnels/list` | list this agent's tunnels | `{}` → `AccountTunnelsV1` |
+| `/v1/tunnels/create` | create a tunnel | `ReqTunnelsCreateV1 { ports, origin: {type:"agent", details:{agent_id, config}}, enabled, alloc: {type:"region", details:{region, port:null}}, name, firewall_id:null }` |
+| `/v1/tunnels/config` | update local address / agent | `ReqTunnelsConfigV1 { tunnel_id, new_agent_id?, new_config? }` |
+| `/tunnels/delete` | delete (V1 has no delete endpoint — reuse account delete or disable) | `{tunnel_id}` — **verify this works for self-managed** |
+
+`origin.details.config` is an `AgentTunnelConfig` — a schema-based `{fields:
+[{name:"local_ip", value}, {name:"local_port", value}]}` object (see the
+`config_data` in a `/v1/tunnels/list` response). The V1 tunnel/response shapes are
+richer than the account API (see `AccountTunnelV1`, `connect_addresses`) — model
+only the fields the operator needs.
+
+### 3. Homelab / architecture decision (for the maintainer)
+
+The existing homelab agent is **assignable** (`is_self_managed: false`) and owns
+the current tunnels (minecraft, qbittorrent). Options:
+- **Run a second, self-managed agent** for operator-created tunnels (cleanest —
+  leaves existing tunnels untouched), give the operator *that* agent's key, and
+  set the tunnels' `origin.agent_id` to it; or
+- Re-claim/replace the existing agent as self-managed (migrates existing tunnels;
+  more disruptive).
+
+The operator only needs the self-managed **key** to call the V1 API; a running
+self-managed **agent** (same key) handles the data-plane forwarding.
+
+> A fragile alternative (the dashboard `__Secure-WebAuth` session cookie) was
+> **deliberately rejected** — expires, unofficial, more work to remove later.
 
 ## What's left to do
 
-1. **Verify the write path** once an API key exists: set `PLAYIT_PROVIDER=playit`
-   + `PLAYIT_API_KEY`, then exercise create → update → delete against a real
-   account (create+delete a throwaway `PlayitTunnel`). Confirm the exact
-   `alloc`/region behaviour (currently defaults to region `"global"`; untested).
-2. **Custom-domain auto-attach** — the missing piece. The "set tunnel domain"
-   endpoint is **not** in the agent's public API surface. To finish:
-   - Discover the endpoint by watching the dashboard's Network tab while attaching
-     a domain to a tunnel (needs an account that can do it), then
-   - Implement it in `custom_domain_status`'s TODO spot in `playit.rs` (attach
-     `domain_id` → `tunnel_id`), gated behind a write credential.
-3. **Homelab deployment / GitOps** — the `deploy/` manifests exist; wiring this
-   into an ArgoCD app (reusing the existing agent token secret for
-   `PLAYIT_AGENT_KEY`, or an API key secret for `PLAYIT_API_KEY`) is a future step.
-4. Nice-to-haves: emit Kubernetes Events, richer status conditions, optionally
-   drive tunnels from annotated `Service` objects (`loadBalancerClass`) in
-   addition to the CRD.
+1. **Rework `PlayitProvider` onto the self-managed V1 path** (the big one). Swap
+   the account `/tunnels/*` calls for the V1 endpoints above, using a
+   self-managed agent key. Keep the `TunnelProvider` trait and the whole control
+   loop as-is — this is a provider-internal change (new request/response structs,
+   new paths). The `PlayitCredential::ApiKey` variant can stay as dormant/dead
+   scaffolding or be removed.
+2. **Claim helper.** Add a way to provision the self-managed key (the
+   `/claim/setup` → user-accept → `/claim/exchange` flow). Could be a `crdgen`-style
+   helper binary (`cargo run --bin claim`) that prints the claim URL and writes
+   the secret, or documented manual `curl` steps. The maintainer must accept the
+   claim in a browser once.
+3. **Verify write end-to-end** with the self-managed key: create → update
+   (`/v1/tunnels/config`) → delete a throwaway `PlayitTunnel`. Confirm delete
+   works for self-managed (V1 has no delete endpoint — may need `/tunnels/delete`
+   or a disable). Confirm `alloc`/region behaviour.
+4. **Custom-domain auto-attach** — still the fuzziest. The "set tunnel domain"
+   endpoint isn't in the public API; discover it from the dashboard Network tab,
+   then implement at the TODO in `custom_domain_status` (`playit.rs`). May or may
+   not be doable with a self-managed agent key — test.
+5. **Homelab deployment / GitOps** — `deploy/` manifests exist; wire an ArgoCD app
+   that runs a self-managed agent + the operator (operator gets the self-managed
+   key via `PLAYIT_AGENT_KEY`). See the architecture decision above.
+6. Nice-to-haves: Kubernetes Events, richer status conditions, optionally drive
+   tunnels from annotated `Service` objects (`loadBalancerClass`).
 
 ## Development workflow
 
@@ -193,8 +250,10 @@ drift check. Pushing to `main` also builds and pushes the GHCR image
 
 ## Gotchas / lessons learned
 
-- **Agent keys are read-only** (see above) — the defining constraint of the whole
-  project right now.
+- **Assignable agent keys are read-only** on the account API; **self-managed**
+  agent keys can create tunnels via the **V1** API. The agent *type* (set at claim
+  time) is the whole ballgame — check `permissions.is_self_managed` in
+  `/v1/agents/rundata`. Account API keys are cancelled (abuse).
 - `/domains/list` returns `[]` for agent keys even when domains are attached to
   tunnels. Detect attached custom domains via the **tunnel's** `domain` field
   (from `/tunnels/list`), not the domains list.
