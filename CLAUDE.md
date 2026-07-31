@@ -198,11 +198,12 @@ self-managed **agent** (same key) handles the data-plane forwarding.
    loop as-is — this is a provider-internal change (new request/response structs,
    new paths). The `PlayitCredential::ApiKey` variant can stay as dormant/dead
    scaffolding or be removed.
-2. **Claim helper.** Add a way to provision the self-managed key (the
-   `/claim/setup` → user-accept → `/claim/exchange` flow). Could be a `crdgen`-style
-   helper binary (`cargo run --bin claim`) that prints the claim URL and writes
-   the secret, or documented manual `curl` steps. The maintainer must accept the
-   claim in a browser once.
+2. ~~Claim helper.~~ **Done** — `cargo run --bin claim` (`src/bin/claim.rs`) runs
+   the `/claim/setup` → user-accept → `/claim/exchange` flow: it prints a
+   `playit.gg/claim/<code>` URL, waits for you to accept in a browser, then prints
+   the self-managed agent secret to stdout (guidance goes to stderr, so
+   `cargo run --bin claim > key.txt` captures just the key). Use that as
+   `PLAYIT_AGENT_KEY`.
 3. **Verify write end-to-end** with the self-managed key: create → update
    (`/v1/tunnels/config`) → delete a throwaway `PlayitTunnel`. Confirm delete
    works for self-managed (V1 has no delete endpoint — may need `/tunnels/delete`

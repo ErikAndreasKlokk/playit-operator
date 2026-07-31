@@ -22,10 +22,15 @@ path = "src/main.rs"
 name = "crdgen"
 path = "src/bin/crdgen.rs"
 
+[[bin]]
+name = "claim"
+path = "src/bin/claim.rs"
+
 [dependencies]
 kube = { version = "0.99.0", features = ["runtime", "derive", "client"] }
 k8s-openapi = { version = "0.24.0", features = ["latest"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+getrandom = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
