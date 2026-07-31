@@ -52,6 +52,13 @@ pub struct PlayitTunnelSpec {
     #[serde(default = "default_port_count")]
     pub port_count: u16,
 
+    /// playit tunnel type — set to `https` for a TLS-terminating web tunnel
+    /// (serves the target over HTTPS on a custom domain), or another playit
+    /// tunnel type (e.g. `minecraft-java`). When set, this overrides `protocol`
+    /// and `portCount`. Leave unset for a plain TCP/UDP port tunnel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_type: Option<String>,
+
     /// Optional region / endpoint preference (a playit region id). When unset,
     /// playit.gg picks the allocation.
     #[serde(default, skip_serializing_if = "Option::is_none")]

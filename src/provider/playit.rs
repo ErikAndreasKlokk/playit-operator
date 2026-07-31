@@ -113,7 +113,7 @@ impl PlayitProvider {
             .clone()
             .unwrap_or_else(|| "global".to_string());
         let req = ReqTunnelsCreateV1 {
-            ports: port_details(desired.protocol, desired.port_count.max(1)),
+            ports: build_ports(desired),
             origin: OriginCreate::Agent(AgentOrigin {
                 agent_id: Some(agent_id.to_string()),
                 config: local_config(&desired.local_ip, desired.local_port),
@@ -270,8 +270,13 @@ fn tunnel_name(key: &str) -> String {
     format!("k8s/{key}")
 }
 
-fn port_details(p: Protocol, count: u16) -> PortDetails {
-    match p {
+fn build_ports(desired: &DesiredTunnel) -> PortDetails {
+    // A tunnel type (e.g. `https`) overrides the raw protocol/port-count.
+    if let Some(tt) = desired.tunnel_type.as_deref() {
+        return PortDetails::TunnelType(tt.to_string());
+    }
+    let count = desired.port_count.max(1);
+    match desired.protocol {
         Protocol::Tcp => PortDetails::Tcp(count),
         Protocol::Udp => PortDetails::Udp(count),
         Protocol::Both => PortDetails::Both(count),
@@ -311,6 +316,8 @@ struct ReqTunnelsCreateV1 {
 #[derive(Serialize)]
 #[serde(tag = "type", content = "details")]
 enum PortDetails {
+    #[serde(rename = "tunnel-type")]
+    TunnelType(String),
     #[serde(rename = "custom-tcp")]
     Tcp(u16),
     #[serde(rename = "custom-udp")]

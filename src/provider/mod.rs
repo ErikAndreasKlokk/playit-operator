@@ -22,6 +22,8 @@ pub struct DesiredTunnel {
     pub key: String,
     pub protocol: Protocol,
     pub port_count: u16,
+    /// playit tunnel type (e.g. `https`); overrides `protocol`/`port_count`.
+    pub tunnel_type: Option<String>,
     pub region: Option<String>,
     pub custom_domain: Option<String>,
     /// In-cluster IP the agent forwards to (the target Service's ClusterIP).
@@ -37,6 +39,7 @@ impl DesiredTunnel {
             key,
             protocol: spec.protocol,
             port_count: spec.port_count,
+            tunnel_type: spec.tunnel_type.clone(),
             region: spec.region.clone(),
             custom_domain: spec.custom_domain.clone(),
             local_ip,
