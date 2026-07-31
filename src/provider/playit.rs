@@ -91,8 +91,14 @@ impl PlayitProvider {
         if v.get("status").and_then(|s| s.as_str()) == Some("success") {
             return Ok(v.get("data").cloned().unwrap_or(serde_json::Value::Null));
         }
-        let kind = v.pointer("/data/type").and_then(|s| s.as_str()).unwrap_or("unknown");
-        let msg = v.pointer("/data/message").and_then(|s| s.as_str()).unwrap_or("");
+        let kind = v
+            .pointer("/data/type")
+            .and_then(|s| s.as_str())
+            .unwrap_or("unknown");
+        let msg = v
+            .pointer("/data/message")
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
         if kind == "auth" && msg == "NotAllowedWithReadOnly" {
             Err(Error::Provider(
                 "playit rejected the write: this credential is read-only (agent keys cannot \
@@ -124,16 +130,27 @@ impl PlayitProvider {
     }
 
     async fn list_tunnels(&self) -> Result<Vec<AccountTunnel>> {
-        let req = ReqList { tunnel_id: None, agent_id: None };
+        let req = ReqList {
+            tunnel_id: None,
+            agent_id: None,
+        };
         let data: AccountTunnels = self.call("/tunnels/list", &req).await?;
         Ok(data.tunnels)
     }
 
-    async fn create_tunnel(&self, name: &str, desired: &DesiredTunnel, agent_id: &str) -> Result<String> {
+    async fn create_tunnel(
+        &self,
+        name: &str,
+        desired: &DesiredTunnel,
+        agent_id: &str,
+    ) -> Result<String> {
         // Default to the "global" network when no region is requested. Override
         // per-tunnel with `spec.region`. (Untested against a live write until an
         // account API key is available — agent keys are read-only.)
-        let region = desired.region.clone().unwrap_or_else(|| "global".to_string());
+        let region = desired
+            .region
+            .clone()
+            .unwrap_or_else(|| "global".to_string());
         let req = ReqCreate {
             name: name.to_string(),
             tunnel_type: None,
@@ -153,7 +170,12 @@ impl PlayitProvider {
         Ok(obj.id)
     }
 
-    async fn update_tunnel(&self, tunnel_id: &str, desired: &DesiredTunnel, agent_id: &str) -> Result<()> {
+    async fn update_tunnel(
+        &self,
+        tunnel_id: &str,
+        desired: &DesiredTunnel,
+        agent_id: &str,
+    ) -> Result<()> {
         let req = ReqUpdate {
             tunnel_id: tunnel_id.to_string(),
             local_ip: desired.local_ip.clone(),
@@ -166,7 +188,9 @@ impl PlayitProvider {
     }
 
     async fn delete_tunnel(&self, tunnel_id: &str) -> Result<()> {
-        let req = ReqDelete { tunnel_id: tunnel_id.to_string() };
+        let req = ReqDelete {
+            tunnel_id: tunnel_id.to_string(),
+        };
         self.call_raw("/tunnels/delete", &req).await?;
         Ok(())
     }
@@ -193,7 +217,12 @@ impl TunnelProvider for PlayitProvider {
         let name = tunnel_name(&desired.key);
         let agent_id = self.agent_id().await?;
 
-        if let Some(t) = self.list_tunnels().await?.into_iter().find(|t| t.name == name) {
+        if let Some(t) = self
+            .list_tunnels()
+            .await?
+            .into_iter()
+            .find(|t| t.name == name)
+        {
             let addr_matches = t.origin.data.local_ip.as_deref() == Some(desired.local_ip.as_str())
                 && t.origin.data.local_port == Some(desired.local_port);
             if !addr_matches {
@@ -228,12 +257,21 @@ impl TunnelProvider for PlayitProvider {
             .find(|t| t.id == id)
             .and_then(|t| t.address())
             .unwrap_or_default();
-        Ok(ProvisionedTunnel { tunnel_id: id, address, custom_domain_ready: false })
+        Ok(ProvisionedTunnel {
+            tunnel_id: id,
+            address,
+            custom_domain_ready: false,
+        })
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
         let name = tunnel_name(key);
-        match self.list_tunnels().await?.into_iter().find(|t| t.name == name) {
+        match self
+            .list_tunnels()
+            .await?
+            .into_iter()
+            .find(|t| t.name == name)
+        {
             Some(t) => {
                 if self.read_only {
                     return Err(read_only_write_error());
