@@ -113,14 +113,14 @@ impl PlayitProvider {
             .clone()
             .unwrap_or_else(|| "global".to_string());
         let req = ReqTunnelsCreateV1 {
-            ports: build_ports(desired),
+            name: tunnel_name(&desired.key),
+            protocol: build_protocol(desired),
             origin: OriginCreate::Agent(AgentOrigin {
                 agent_id: Some(agent_id.to_string()),
                 config: local_config(&desired.local_ip, desired.local_port),
             }),
+            endpoint: EndpointCreate::Region(UseAllocRegion { region, port: None }),
             enabled: true,
-            alloc: Some(AllocRequest::Region(UseAllocRegion { region, port: None })),
-            name: Some(tunnel_name(&desired.key)),
             firewall_id: None,
         };
         let obj: ObjectId = self.call("/v1/tunnels/create", &req).await?;
@@ -138,9 +138,8 @@ impl PlayitProvider {
     }
 
     async fn delete_tunnel(&self, tunnel_id: &str) -> Result<()> {
-        // NOTE: the V1 API has no delete endpoint, so this uses the account
-        // `/tunnels/delete`. Verify it works for a self-managed agent's own
-        // tunnels (see CLAUDE.md TODO); it may need a disable instead.
+        // The V1 API has no delete endpoint; `/tunnels/delete` works for a
+        // self-managed agent's own tunnels (verified live).
         let req = ReqDelete {
             tunnel_id: tunnel_id.to_string(),
         };
@@ -270,17 +269,21 @@ fn tunnel_name(key: &str) -> String {
     format!("k8s/{key}")
 }
 
-fn build_ports(desired: &DesiredTunnel) -> PortDetails {
+fn build_protocol(desired: &DesiredTunnel) -> ProtocolCreate {
     // A tunnel type (e.g. `https`) overrides the raw protocol/port-count.
     if let Some(tt) = desired.tunnel_type.as_deref() {
-        return PortDetails::TunnelType(tt.to_string());
+        return ProtocolCreate::TunnelType(tt.to_string());
     }
-    let count = desired.port_count.max(1);
-    match desired.protocol {
-        Protocol::Tcp => PortDetails::Tcp(count),
-        Protocol::Udp => PortDetails::Udp(count),
-        Protocol::Both => PortDetails::Both(count),
-    }
+    let port_type = match desired.protocol {
+        Protocol::Tcp => "tcp",
+        Protocol::Udp => "udp",
+        Protocol::Both => "both",
+    };
+    ProtocolCreate::RawPorts(RawPorts {
+        port_type: port_type.to_string(),
+        port_count: desired.port_count.max(1),
+        software_description: "playit-operator".to_string(),
+    })
 }
 
 fn local_config(ip: &str, port: u16) -> AgentTunnelConfig {
@@ -305,29 +308,34 @@ struct Empty {}
 
 #[derive(Serialize)]
 struct ReqTunnelsCreateV1 {
-    ports: PortDetails,
+    name: String,
+    protocol: ProtocolCreate,
     origin: OriginCreate,
+    endpoint: EndpointCreate,
     enabled: bool,
-    alloc: Option<AllocRequest>,
-    name: Option<String>,
     firewall_id: Option<String>,
 }
 
 #[derive(Serialize)]
 #[serde(tag = "type", content = "details")]
-enum PortDetails {
+enum ProtocolCreate {
+    /// A named playit tunnel type, e.g. `https`, `minecraft-java`.
     #[serde(rename = "tunnel-type")]
     TunnelType(String),
-    #[serde(rename = "custom-tcp")]
-    Tcp(u16),
-    #[serde(rename = "custom-udp")]
-    Udp(u16),
-    #[serde(rename = "custom-both")]
-    Both(u16),
+    /// Plain TCP/UDP port allocation.
+    #[serde(rename = "raw-ports")]
+    RawPorts(RawPorts),
 }
 
 #[derive(Serialize)]
-#[serde(tag = "type", content = "details")]
+struct RawPorts {
+    port_type: String,
+    port_count: u16,
+    software_description: String,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", content = "data")]
 enum OriginCreate {
     #[serde(rename = "agent")]
     Agent(AgentOrigin),
@@ -341,7 +349,7 @@ struct AgentOrigin {
 
 #[derive(Serialize)]
 #[serde(tag = "type", content = "details")]
-enum AllocRequest {
+enum EndpointCreate {
     #[serde(rename = "region")]
     Region(UseAllocRegion),
 }
